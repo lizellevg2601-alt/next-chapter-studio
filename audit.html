@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Free Life Audit — The Next Chapter Life Audit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css?v=7">
+  <link rel="stylesheet" href="/audit-styles.css">
+  <link rel="icon" type="image/png" href="/assets/compass.png">
+
+  <script src="/audit-config.js"></script>
+</head>
+<body class="audit-page">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="container header-inner">
+      <a href="/" class="logo">
+        <img src="/assets/logo.png" alt="Next Chapter Studio" class="logo-img">
+      </a>
+      <nav class="nav">
+        <a href="/">Home</a>
+        <a href="/#workbook">Workbook</a>
+        <a href="/#events">Events</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="audit-container audit-section" id="app">
+      <!-- Views are rendered here by JavaScript -->
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      /* ============================
+         STATE
+         ============================ */
+      const STORAGE_KEY = 'ncla_state';
+
+      const defaultState = {
+        step: 'landing',
+        answers: {},
+        priorityAreas: [],
+        whatBroughtYou: null,
+        whatBroughtYouOther: '',
+        email: '',
+        scored: false,
+        results: null,
+        startedAt: null,
+        completedAt: null,
+        lastQuestionIndex: 0,
+        questionOrder: [],
+        sessionId: null,
+      };
+
+      let state;
+
+
+
+      function loadState() {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            state = { ...defaultState, ...parsed };
+            return;
+          }
+        } catch (e) { /* ignore */ }
+        state = { ...defaultState };
+      }
+
+      function saveState() {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (e) { /* ignore */ }
+      }
+
+      function resetState() {
+        state = { ...defaultState };
+        saveState();
+      }
+
+      /* ============================
+         ANALYTICS EVENTS
+         ============================ */
+      function trackEvent(eventName, data) {
+        const enabled = AUDIT_CONFIG.analyticsEvents;
+        const name = Object.values(enabled).includes(eventName) ? eventName : eventName;
+
+        if (typeof window.lintrk === 'function') {
+          try { window.lintrk('track', { conversion_id: null }); } catch (e) { /* ignore */ }
+        }
+
+        if (typeof gtag === 'function') {
+          try { gtag('event', name, data || {}); } catch (e) { /* ignore */ }
+        }
+
+        console.log('[Audit Event]', name, data || '');
+      }
+
+      /* ============================
+         VIEW HELPERS
+         ============================ */
+      function $(id) { return document.getElementById(id); }
+
+      const appEl = document.getElementById('app');
+
+      function render(html) {
+        appEl.innerHTML = html;
+      }
+
+      function scrollToTop() {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      /* ============================
+         SHUFFLE questions so order is randomised per session
+         ============================ */
+      function shuffleArray(arr) {
+        const shuffled = [...arr];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        return shuffled;
+      }
+
+      function initQuestionOrder() {
+        if (state.questionOrder && state.questionOrder.length === AUDIT_CONFIG.questions.length) {
+          return;
+        }
+        state.questionOrder = shuffleArray(AUDIT_CONFIG.questions.map(q => q.id));
+        saveState();
+      }
+
+      function getCurrentQuestion() {
+        if (!state.questionOrder.length) initQuestionOrder();
+        const idx = state.lastQuestionIndex;
+        const qId = state.questionOrder[idx];
+        if (!qId) return null;
+        return AUDIT_CONFIG.questions.find(q => q.id === qId);
+      }
+
+      /* ============================
+         SCORING ENGINE
+         ============================ */
+      function calculateResults() {
+        const catScores = {};
+        AUDIT_CONFIG.categories.forEach(cat => {
+          const catQuestions = AUDIT_CONFIG.questions.filter(q => q.category === cat.id);
+          const total = catQuestions.reduce((sum, q) => {
+            const val = parseInt(state.answers[q.id], 10);
+            return sum + (isNaN(val) ? 0 : val);
+          }, 0);
+          const avg = total / catQuestions.length;
+          const percent = ((avg - 1) / 9) * 100;
+          catScores[cat.id] = {
+            score: Math.round(avg * 10) / 10,
+            percent: Math.round(percent),
+            raw: avg,
+          };
+        });
+
+        const allAnswers = Object.values(state.answers).map(v => parseInt(v, 10)).filter(v => !isNaN(v));
+        const overallRaw = allAnswers.reduce((a, b) => a + b, 0) / allAnswers.length;
+        const overallPercent = Math.round(((overallRaw - 1) / 9) * 100);
+
+        let chapter = AUDIT_CONFIG.chapters.find(c => overallPercent >= c.minPercent && overallPercent <= c.maxPercent);
+        if (!chapter) chapter = AUDIT_CONFIG.chapters[AUDIT_CONFIG.chapters.length - 1];
+
+        const sorted = Object.entries(catScores).sort((a, b) => b[1].score - a[1].score);
+        const strongest = sorted[0];
+        const weakest = sorted[sorted.length - 1];
+
+        const pattern = detectPattern(catScores);
+
+        return {
+          categoryScores: catScores,
+          overallRaw: Math.round(overallRaw * 10) / 10,
+          overallPercent,
+          chapter,
+          strongest: { category: strongest[0], score: strongest[1] },
+          weakest: { category: weakest[0], score: weakest[1] },
+          pattern,
+        };
+      }
+
+      function detectPattern(catScores) {
+        const scores = Object.values(catScores).map(c => c.score);
+        const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+        const max = Math.max(...scores);
+        const min = Math.min(...scores);
+        const variance = max - min;
+        const belowMid = scores.filter(s => s < 5).length;
+
+        if (belowMid >= 4) {
+          const lowCats = ['fun-recreation', 'health', 'personal-growth', 'purpose-fulfilment'];
+          const hasLowRec = lowCats.some(c => (catScores[c]?.score || 10) < 5);
+          if (hasLowRec) return AUDIT_CONFIG.patterns.find(p => p.id === 'reconnection');
+        }
+
+        if (variance >= 4) {
+          return AUDIT_CONFIG.patterns.find(p => p.id === 'pulled-directions');
+        }
+
+        if (avg >= 6 && variance <= 3) {
+          return AUDIT_CONFIG.patterns.find(p => p.id === 'momentum');
+        }
+
+        if (avg >= 6 && variance >= 2.5) {
+          return AUDIT_CONFIG.patterns.find(p => p.id === 'strong-foundation');
+        }
+
+        if (belowMid >= 3) {
+          return AUDIT_CONFIG.patterns.find(p => p.id === 'reconnection');
+        }
+
+        return AUDIT_CONFIG.patterns.find(p => p.id === 'pulled-directions');
+      }
+
+      function getCategoryInterpretation(catId, score) {
+        const interps = AUDIT_CONFIG.categoryInterpretations[catId];
+        if (!interps) return '';
+        if (score >= 7) return interps.high;
+        if (score >= 4) return interps.moderate;
+        return interps.low;
+      }
+
+      function getBarClass(score) {
+        if (score >= 7) return 'high';
+        if (score >= 4) return 'moderate';
+        return 'low';
+      }
+
+      function getWorkbookRecommendations(catIds) {
+        const all = [];
+        catIds.forEach(catId => {
+          const recs = AUDIT_CONFIG.workbookRecommendations[catId];
+          if (recs) recs.forEach(r => { if (!all.includes(r)) all.push(r); });
+        });
+        return all;
+      }
+
+
+      /* ============================
+         VIEW: LANDING
+         ============================ */
+      function renderLanding() {
+        trackEvent(AUDIT_CONFIG.analyticsEvents.pageViewed);
+        render(`
+          <div class="audit-landing">
+            <span class="label-pill">FREE ASSESSMENT</span>
+            <h1>Where are you today?</h1>
+            <p class="audit-subtitle">Take the free Next Chapter Life Audit and discover what feels strong, what needs attention and where your next chapter may begin.</p>
+            <p class="audit-meta">${AUDIT_CONFIG.totalQuestions} thoughtful questions. Approximately five minutes.</p>
+            <button class="btn btn-primary btn-large" onclick="auditApp.start()">Start My Free Life Audit</button>
+            <p class="audit-privacy-note">Your answers are private and stored only on your device.</p>
+          </div>
+        `);
+      }
+
+      /* ============================
+         VIEW: QUESTIONS
+         ============================ */
+      function renderQuestion() {
+        const q = getCurrentQuestion();
+        if (!q) {
+          renderPersonalisation();
+          return;
+        }
+
+        const idx = state.lastQuestionIndex;
+        const total = AUDIT_CONFIG.questions.length;
+        const progress = ((idx) / total) * 100;
+        const cat = AUDIT_CONFIG.categories.find(c => c.id === q.category);
+        const selected = state.answers[q.id];
+        const hasPrev = idx > 0;
+        const isLast = idx === total - 1;
+        const canContinue = selected !== undefined && selected !== null;
+
+        let ratingHTML = '';
+        for (let i = AUDIT_CONFIG.scaleMin; i <= AUDIT_CONFIG.scaleMax; i++) {
+          ratingHTML += `<button class="audit-rating-btn${selected == i ? ' selected' : ''}" data-value="${i}" onclick="auditApp.rate(${i}, event)" aria-label="${i}">${i}</button>`;
+        }
+
+        const categoryLabel = cat ? cat.label : '';
+
+        render(`
+          <div>
+            <div class="audit-progress">
+              <div class="audit-progress-bar">
+                <div class="audit-progress-fill" style="width:${progress}%"></div>
+              </div>
+              <span class="audit-progress-text">${idx + 1} of ${total}</span>
+            </div>
+
+            <div class="audit-question-card" role="region" aria-label="Question ${idx + 1}">
+              <div class="audit-question-category">${categoryLabel}</div>
+              <div class="audit-question-number">Question ${idx + 1} of ${total}</div>
+              <p class="audit-question-text">${q.text}</p>
+
+              <div class="audit-rating">
+                <div class="audit-rating-labels">
+                  <span>${AUDIT_CONFIG.scaleLabels.low}</span>
+                  <span>${AUDIT_CONFIG.scaleLabels.high}</span>
+                </div>
+                <div class="audit-rating-grid" role="radiogroup" aria-label="Rate from 1 to 10">
+                  ${ratingHTML}
+                </div>
+              </div>
+
+              <div class="audit-nav">
+                <button class="btn btn-outline" onclick="auditApp.prev()" ${!hasPrev ? 'disabled' : ''}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="15 18 9 12 15 6"/></svg>
+                  Back
+                </button>
+                <div></div>
+              </div>
+            </div>
+          </div>
+        `);
+
+        if (selected) {
+          const btn = document.querySelector(`.audit-rating-btn[data-value="${selected}"]`);
+          if (btn) btn.focus();
+        }
+      }
+
+      /* ============================
+         VIEW: PERSONALISATION
+         ============================ */
+      function renderPersonalisation() {
+        const pq = AUDIT_CONFIG.personalisationQuestions;
+        const total = AUDIT_CONFIG.questions.length;
+        const progress = 100;
+
+        render(`
+          <div>
+            <div class="audit-progress">
+              <div class="audit-progress-bar">
+                <div class="audit-progress-fill" style="width:${progress}%"></div>
+              </div>
+              <span class="audit-progress-text">${total + 1} of ${total + 2}</span>
+            </div>
+
+            <div class="audit-personalisation">
+              <div id="audit-pq-0"></div>
+              <div id="audit-pq-1" style="display:none"></div>
+            </div>
+          </div>
+        `);
+
+        renderPersonalisationQuestion(0);
+      }
+
+      function renderPersonalisationQuestion(idx) {
+        const pq = AUDIT_CONFIG.personalisationQuestions[idx];
+        if (!pq) {
+          renderEmailCapture();
+          return;
+        }
+
+        const container = document.getElementById(`audit-pq-${idx}`);
+        if (!container) return;
+
+        if (pq.type === 'select-multiple') {
+          let optionsHTML = '';
+          pq.options.forEach(opt => {
+            const selected = state.priorityAreas.includes(opt);
+            optionsHTML += `<button class="audit-option-btn${selected ? ' selected' : ''}" data-value="${opt}" onclick="auditApp.togglePriority('${opt}')">${opt}</button>`;
+          });
+
+          container.style.display = 'block';
+          container.innerHTML = `
+            <h2>${pq.text}</h2>
+            <p class="audit-question-sub">Select exactly ${pq.maxSelections}</p>
+            <div class="audit-option-grid">
+              ${optionsHTML}
+            </div>
+            <div class="audit-nav">
+              <button class="btn btn-outline" onclick="auditApp.goBackFromPersonalisation()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="15 18 9 12 15 6"/></svg>
+                Back
+              </button>
+              <button class="btn btn-primary" onclick="auditApp.nextPersonalisation()" ${state.priorityAreas.length !== pq.maxSelections ? 'disabled' : ''}>
+                Continue
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+          `;
+        } else if (pq.type === 'select-one') {
+          let optionsHTML = '';
+          pq.options.forEach(opt => {
+            const selected = state.whatBroughtYou === opt.value;
+            optionsHTML += `<button class="audit-option-btn${selected ? ' radio-selected' : ''}" data-value="${opt.value}" onclick="auditApp.selectWhatBroughtYou('${opt.value}')">${opt.label}</button>`;
+          });
+
+          const showOther = state.whatBroughtYou === 'other';
+          container.style.display = 'block';
+          container.innerHTML = `
+            <h2>${pq.text}</h2>
+            <p class="audit-question-sub">Choose one</p>
+            <div class="audit-option-grid" style="grid-template-columns:1fr">
+              ${optionsHTML}
+            </div>
+            ${showOther ? `
+              <div class="audit-other-field">
+                <input type="text" placeholder="Tell us more..." value="${auditApp.escapeHtml(state.whatBroughtYouOther)}" oninput="auditApp.setWhatBroughtYouOther(this.value)" />
+              </div>
+            ` : ''}
+            <div class="audit-nav">
+              <button class="btn btn-outline" onclick="auditApp.goBackFromPersonalisation(1)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="15 18 9 12 15 6"/></svg>
+                Back
+              </button>
+              <button class="btn btn-primary" onclick="auditApp.nextPersonalisation()" ${!state.whatBroughtYou ? 'disabled' : ''}>
+                Continue
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+          `;
+        }
+      }
+
+      /* ============================
+         VIEW: EMAIL CAPTURE
+         ============================ */
+      function renderEmailCapture() {
+        render(`
+          <div class="audit-email-section">
+            <h2>Your Life Audit is Ready</h2>
+            <p class="audit-question-sub">Enter your email to receive your full results and save your assessment for later.</p>
+
+            <div class="audit-email-field">
+              <input type="email" id="audit-email-input" placeholder="Your email address (optional)" value="${auditApp.escapeHtml(state.email)}" oninput="auditApp.setEmail(this.value)" />
+            </div>
+
+
+
+            <button class="btn btn-primary btn-large" onclick="auditApp.complete()">See My Results</button>
+            <a class="audit-skip-link" onclick="auditApp.complete()">Skip, show my results</a>
+
+            <div class="audit-nav" style="justify-content:flex-start;margin-top:32px;">
+              <button class="btn btn-outline" onclick="auditApp.goBackToPersonalisation()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="15 18 9 12 15 6"/></svg>
+                Back
+              </button>
+            </div>
+          </div>
+        `);
+
+        const emailInput = document.getElementById('audit-email-input');
+        if (emailInput && !state.email) {
+          setTimeout(() => emailInput.focus(), 300);
+        }
+      }
+
+      /* ============================
+         VIEW: RESULTS
+         ============================ */
+      function renderResults() {
+        if (!state.results) return;
+        const r = state.results;
+        const chapter = r.chapter;
+        const pattern = r.pattern;
+
+        const catLabels = AUDIT_CONFIG.categories.map(c => c.label);
+        const catScores = AUDIT_CONFIG.categories.map(c => r.categoryScores[c.id]?.score || 0);
+
+        trackEvent(AUDIT_CONFIG.analyticsEvents.resultsViewed);
+
+        render(`
+          <div class="audit-results">
+            <!-- Header -->
+            <div class="audit-results-header">
+              <div class="audit-chapter-badge">${chapter.label}</div>
+              <p style="color:#5F6470;font-size:0.95rem;line-height:1.6;max-width:560px;margin:12px auto 0;">${chapter.description}</p>
+            </div>
+
+            <!-- Wheel -->
+            <div class="audit-wheel-container">
+              <span class="label-pill" style="display:inline-block;margin-bottom:8px;">THE LIFE AUDIT</span>
+              <p class="audit-scale-hint" style="font-size:0.85rem;color:#5F6470;margin-bottom:4px;">Your answers have created a picture of how life feels for you right now.</p>
+              <p class="audit-scale-hint" style="font-size:0.8rem;color:#C98A4A;margin-bottom:20px;">1 = Needs attention &nbsp;&middot;&nbsp; 10 = Feels deeply satisfying</p>
+              <div id="audit-wheel-wrapper" class="audit-wheel-wrapper" style="max-width:560px;margin:0 auto;"></div>
+              <p class="audit-disclaimer" style="margin-top:16px;font-size:0.85rem;color:#5F6470;font-style:italic;font-family:'Playfair Display',serif;">This is where you are right now, not who you are.</p>
+            </div>
+
+            <!-- Detail cards -->
+            <div class="audit-results-details">
+              <div class="audit-detail-card">
+                <h4>Strongest Area</h4>
+                <div class="audit-detail-value">${catLabel(r.strongest.category)}</div>
+                <div class="audit-detail-score">${r.strongest.score.score.toFixed(1)} / 10</div>
+              </div>
+              <div class="audit-detail-card">
+                <h4>Area to Explore</h4>
+                <div class="audit-detail-value">${catLabel(r.weakest.category)}</div>
+                <div class="audit-detail-score">${r.weakest.score.score.toFixed(1)} / 10</div>
+              </div>
+            </div>
+
+            <!-- Priority areas -->
+            ${state.priorityAreas.length > 0 ? `
+              <div class="audit-detail-card" style="margin-bottom:32px;">
+                <h4>Your Priority Areas</h4>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                  ${state.priorityAreas.map(a => `<span style="background:rgba(233,95,69,0.1);color:#E95F45;padding:6px 14px;border-radius:16px;font-size:0.85rem;font-weight:600;">${a}</span>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+
+            <!-- Pattern -->
+            ${pattern ? `
+              <div class="audit-pattern">
+                <h3>${pattern.label}</h3>
+                <p>${pattern.interpretation}</p>
+              </div>
+            ` : ''}
+
+            <!-- Category scores with interpretations -->
+            <div class="audit-category-scores">
+              <h3>Your Scores by Area</h3>
+              ${AUDIT_CONFIG.categories.map(c => {
+                const score = r.categoryScores[c.id];
+                const isPriority = state.priorityAreas.includes(c.label);
+                return `
+                  <div class="audit-category-bar">
+                    <div class="audit-category-bar-header">
+                      <span>${c.label}${isPriority ? ' <span class="audit-priority-tag">Priority</span>' : ''}</span>
+                      <span class="audit-cat-score">${score.score.toFixed(1)} / 10</span>
+                    </div>
+                    <div class="audit-category-bar-track">
+                      <div class="audit-category-bar-fill ${getBarClass(score.score)}" style="width:${score.percent}%"></div>
+                    </div>
+                    <div class="audit-category-interp">${getCategoryInterpretation(c.id, score.score)}</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+
+
+            <!-- Workbook CTA -->
+            <div class="audit-workbook-cta">
+              <h3>${AUDIT_CONFIG.workbookCta.intro}</h3>
+              <p>${AUDIT_CONFIG.workbookCta.copy}</p>
+              <p style="font-size:0.85rem;color:rgba(255,255,255,0.7);margin-bottom:20px;">
+                Recommended exercises: ${getWorkbookRecommendations(
+                  state.priorityAreas.length > 0
+                    ? state.priorityAreas.map(a => AUDIT_CONFIG.categories.find(c => c.label === a)?.id).filter(Boolean)
+                    : [r.weakest.category]
+                ).join(', ')}
+              </p>
+              <a href="${AUDIT_CONFIG.workbookCta.purchaseUrl}" class="btn btn-large" onclick="auditApp.trackWorkbookCta()">${AUDIT_CONFIG.workbookCta.buttonText}</a>
+            </div>
+
+            <div class="audit-share">
+              <button class="btn btn-secondary" onclick="auditApp.downloadShareCard()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Save Results
+              </button>
+            </div>
+
+            <!-- Retake -->
+            <div class="audit-retake">
+              <button class="btn btn-outline" onclick="auditApp.retake()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Retake the Assessment
+              </button>
+            </div>
+          </div>
+        `);
+
+        setTimeout(() => {
+          initLifeAuditWheel(catScores);
+        }, 100);
+      }
+
+      /* ============================
+         LIFE AUDIT WHEEL (SVG)
+         ============================ */
+      function initLifeAuditWheel(scores) {
+        const container = document.getElementById('audit-wheel-wrapper');
+        if (!container) return;
+
+        const W = 800, H = 800, cx = 400, cy = 400, wheelR = 180, maxScore = 10;
+
+        const categories = [
+          { id: 'career', label: 'CAREER', angle: -90, color: '#062B4F', icon: 'briefcase' },
+          { id: 'finances', label: 'FINANCES', angle: -45, color: '#E95F45', icon: 'pound' },
+          { id: 'health', label: 'HEALTH', angle: 0, color: '#C98A4A', icon: 'heart' },
+          { id: 'relationships', label: 'RELATIONSHIPS', angle: 45, color: '#7C8F6E', icon: 'people' },
+          { id: 'personal-growth', label: 'PERSONAL\nGROWTH', angle: 90, color: '#062B4F', icon: 'book' },
+          { id: 'fun-recreation', label: 'FUN &\nRECREATION', angle: 135, color: '#E95F45', icon: 'sun' },
+          { id: 'environment', label: 'ENVIRONMENT', angle: 180, color: '#C98A4A', icon: 'home' },
+          { id: 'purpose-fulfilment', label: 'PURPOSE &\nFULFILMENT', angle: -135, color: '#7C8F6E', icon: 'star' },
+        ];
+
+        function deg(a) { return a * Math.PI / 180; }
+        function pt(angle, r) {
+          const a = deg(angle);
+          return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+        }
+
+        const icons = {
+          briefcase: '<path d="M4 7h16v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>',
+          pound: '<text x="13" y="17" text-anchor="middle" fill="white" font-family="Inter,serif" font-weight="700" font-size="14">\u00a3</text>',
+          heart: '<path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M10 11l2 2 4-4" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+          people: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><circle cx="9" cy="7" r="4" fill="none" stroke="white" stroke-width="1.8"/><path d="M22 21v-2a4 4 0 0 0-3-3.87" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M16 3.87a4 4 0 0 1 0 7.26" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>',
+          book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="none" stroke="white" stroke-width="1.8"/><path d="M12 6v7" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round"/><path d="M9 9l3-3 3 3" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+          sun: '<circle cx="13" cy="13" r="5" fill="none" stroke="white" stroke-width="1.8"/><path d="M13 1v3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M13 22v3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M5.64 5.64l2.12 2.12" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M18.36 18.36l2.12 2.12" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M1 13h3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M22 13h3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M5.64 20.36l2.12-2.12" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M18.36 7.64l2.12-2.12" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>',
+          home: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/><polyline points="9 22 9 12 15 12 15 22" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>',
+          star: '<polygon points="13 2 16.09 8.26 23 9.27 18 14.14 19.18 21.02 13 17.77 6.82 21.02 8 14.14 3 9.27 9.91 8.26" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+        };
+
+        let svg = [];
+        svg.push('<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Life Audit Wheel showing scores across 8 life categories" class="life-audit-svg" style="width:100%;height:auto;display:block;">');
+        svg.push('<defs><filter id="badge-shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(6,43,79,0.15)"/></filter><filter id="glow-glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>');
+
+        // Background circle for the wheel area
+        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (wheelR + 12) + '" fill="#FAF6EF" stroke="rgba(6,43,79,0.04)" stroke-width="1"/>');
+
+        var ringLevels = [2, 4, 6, 8, 10];
+        ringLevels.forEach(function(level) {
+          var r = (level / maxScore) * wheelR;
+          var stroke = level === 10 ? 'rgba(233,95,69,0.3)' : 'rgba(6,43,79,0.08)';
+          var sw = level === 10 ? 1.8 : 0.8;
+          svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + stroke + '" stroke-width="' + sw + '"/>');
+          var p = pt(-90, r);
+          svg.push('<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle" fill="rgba(6,43,79,0.35)" font-family="Inter,sans-serif" font-size="10" font-weight="500" text-rendering="geometricPrecision">' + level + '</text>');
+        });
+
+        categories.forEach(function(cat) {
+          var p = pt(cat.angle, wheelR + 8);
+          svg.push('<line x1="' + cx + '" y1="' + cy + '" x2="' + p.x + '" y2="' + p.y + '" stroke="rgba(6,43,79,0.06)" stroke-width="0.8"/>');
+        });
+
+        svg.push('<g id="life-audit-community" style="display:none;"></g>');
+
+        var points = categories.map(function(cat) {
+          var idx = AUDIT_CONFIG.categories.findIndex(function(c) { return c.id === cat.id; });
+          var sv = scores[idx] || 0;
+          var r = (sv / maxScore) * wheelR;
+          var p = pt(cat.angle, r);
+          return { x: p.x, y: p.y, score: sv, cat: cat, idx: idx };
+        });
+
+        var polyPoints = points.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+        svg.push('<polygon points="' + polyPoints + '" fill="rgba(233,95,69,0.18)" stroke="#E95F45" stroke-width="2" stroke-linejoin="round" class="life-audit-user-poly"/>');
+
+        var maxUserScore = Math.max.apply(null, points.map(function(p) { return p.score; }));
+        points.forEach(function(p, i) {
+          var isStrongest = p.score >= maxUserScore;
+          var mr = isStrongest ? 7 : 5;
+          svg.push('<circle cx="' + p.x + '" cy="' + p.y + '" r="' + mr + '" fill="#E95F45" stroke="#FAF6EF" stroke-width="2.5" class="life-audit-marker" data-category="' + categories[i].id + '" tabindex="0" role="button"/>');
+          if (isStrongest) {
+            svg.push('<circle cx="' + p.x + '" cy="' + p.y + '" r="' + (mr + 4) + '" fill="none" stroke="#E95F45" stroke-width="1.2" opacity="0.35" class="life-audit-glow"/>');
+          }
+        });
+
+        var badgeR = 255;
+        categories.forEach(function(cat) {
+          var p = pt(cat.angle, badgeR);
+          var bs = 30;
+          var catLabel = AUDIT_CONFIG.categories.find(function(c) { return c.id === cat.id; });
+          var isPriority = state.priorityAreas && state.priorityAreas.indexOf(catLabel ? catLabel.label : '') !== -1;
+          svg.push('<g class="life-audit-badge" data-category="' + cat.id + '" style="cursor:pointer;" tabindex="0" role="button" filter="url(#badge-shadow)">');
+          svg.push('<circle cx="' + p.x + '" cy="' + p.y + '" r="' + (bs/2) + '" fill="' + cat.color + '" stroke="rgba(255,255,255,0.6)" stroke-width="1.5"/>');
+          svg.push('<g transform="translate(' + (p.x - 13) + ', ' + (p.y - 13) + ') scale(1.08)">' + icons[cat.icon] + '</g>');
+          svg.push('</g>');
+          if (isPriority) {
+            svg.push('<circle cx="' + p.x + '" cy="' + p.y + '" r="' + (bs/2 + 5) + '" fill="none" stroke="#E95F45" stroke-width="1.5" stroke-dasharray="3,2" class="life-audit-priority-ring"/>');
+          }
+        });
+
+        categories.forEach(function(cat) {
+          var p = pt(cat.angle, badgeR);
+          var lines = cat.label.split('\n');
+
+          // Explicit per-category label placement
+          var labelConfig = {
+            'career':             { dx: 0, dy: -26, anchor: 'middle' },
+            'finances':           { dx: 36, dy: -6, anchor: 'start' },
+            'health':             { dx: 36, dy: 0, anchor: 'start' },
+            'relationships':      { dx: 36, dy: 6, anchor: 'start' },
+            'personal-growth':    { dx: 0, dy: 28, anchor: 'middle' },
+            'fun-recreation':     { dx: -36, dy: 6, anchor: 'end' },
+            'environment':        { dx: -36, dy: 0, anchor: 'end' },
+            'purpose-fulfilment': { dx: -36, dy: -6, anchor: 'end' },
+          };
+
+          var cfg = labelConfig[cat.id] || { dx: 0, dy: 0, anchor: 'middle' };
+          var lx = p.x + cfg.dx;
+          var ly = p.y + cfg.dy;
+
+          lines.forEach(function(line, li) {
+            var ly2 = ly + (lines.length > 1 ? (li - (lines.length - 1) / 2) * 14 : 0);
+            svg.push('<text x="' + lx + '" y="' + ly2 + '" text-anchor="' + cfg.anchor + '" fill="#062B4F" font-family="Inter,sans-serif" font-size="10" font-weight="700" letter-spacing="0.08em" text-rendering="geometricPrecision" class="life-audit-label">' + line + '</text>');
+          });
+        });
+
+        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="3.5" fill="#062B4F" opacity="0.8"/>');
+        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="none" stroke="#062B4F" stroke-width="0.5" opacity="0.2"/>');
+        svg.push('</svg>');
+
+        container.innerHTML = svg.join('\n');
+
+        var prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (!prefersReduced) {
+          var poly = container.querySelector('.life-audit-user-poly');
+          var markers = container.querySelectorAll('.life-audit-marker');
+          var glows = container.querySelectorAll('.life-audit-glow');
+          if (poly) poly.style.opacity = '0';
+          markers.forEach(function(m) { m.style.opacity = '0'; });
+          glows.forEach(function(g) { g.style.opacity = '0'; });
+          var duration = 800, startTime = performance.now();
+          function anim(now) {
+            var elapsed = now - startTime;
+            var progress = Math.min(elapsed / duration, 1);
+            var ease = 1 - (1 - progress) * (1 - progress);
+            if (poly) poly.style.opacity = String(ease);
+            markers.forEach(function(m, i) {
+              var d = i * 60;
+              var mp = Math.max(0, Math.min((elapsed - d) / duration, 1));
+              m.style.opacity = String(1 - (1 - mp) * (1 - mp));
+            });
+            glows.forEach(function(g) { g.style.opacity = String(ease * 0.4); });
+            if (progress < 1) requestAnimationFrame(anim);
+          }
+          requestAnimationFrame(anim);
+        }
+
+        var tooltipState = { catId: null, timer: null };
+
+        function getScoreData(catId) {
+          var cat = categories.find(function(c) { return c.id === catId; });
+          if (!cat) return null;
+          var idx = AUDIT_CONFIG.categories.findIndex(function(c) { return c.id === catId; });
+          var sv = scores[idx] || 0;
+          var catConfig = AUDIT_CONFIG.categories.find(function(c) { return c.id === catId; });
+          var label = catConfig ? catConfig.label : catId;
+          var interp = getCategoryInterpretation(catId, sv);
+          return { cat: cat, score: sv, label: label, interp: interp };
+        }
+
+        function showTooltip(catId, evt) {
+          if (tooltipState.catId === catId) return;
+          tooltipState.catId = catId;
+          if (tooltipState.timer) clearTimeout(tooltipState.timer);
+
+          var data = getScoreData(catId);
+          if (!data) return;
+
+          var catConfig = categories.find(function(c) { return c.id === catId; });
+          if (!catConfig) return;
+
+          var existing = document.querySelector('.life-audit-tooltip');
+          if (existing) existing.remove();
+
+          var tip = document.createElement('div');
+          tip.className = 'life-audit-tooltip';
+          tip.dataset.catId = catId;
+          tip.innerHTML = '<span class="life-audit-tip-dot" style="background:' + data.cat.color + '"></span><span class="life-audit-tip-label">' + data.label + '</span><span class="life-audit-tip-score">' + data.score.toFixed(1) + '</span>';
+          tip.style.position = 'fixed';
+          tip.style.left = '-999px';
+          tip.style.top = '-999px';
+          document.body.appendChild(tip);
+
+          // Calculate screen position from SVG geometry
+          var svgEl = container.querySelector('svg');
+          if (svgEl) {
+            var svgRect = svgEl.getBoundingClientRect();
+            var scaleX = svgRect.width / W;
+            var scaleY = svgRect.height / H;
+            var badgePt = pt(catConfig.angle, badgeR);
+            var sx = svgRect.left + badgePt.x * scaleX;
+            var sy = svgRect.top + badgePt.y * scaleY;
+            var tw = tip.offsetWidth;
+            var th = tip.offsetHeight;
+            var left = sx - tw / 2;
+            var top = sy - th - 8;
+            if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
+            if (left < 10) left = 10;
+            if (top < 10) top = sy + 10;
+            tip.style.left = left + 'px';
+            tip.style.top = top + 'px';
+          }
+        }
+
+        function hideTooltip(catId) {
+          if (catId && tooltipState.catId !== catId) return;
+          tooltipState.timer = setTimeout(function() {
+            tooltipState.catId = null;
+            var tip = document.querySelector('.life-audit-tooltip');
+            if (tip) tip.remove();
+          }, 100);
+        }
+
+        // Single delegated hover handler on the container
+        container.addEventListener('mouseover', function(e) {
+          var target = e.target.closest('[data-category]');
+          if (target) {
+            var cid = target.getAttribute('data-category');
+            if (cid) showTooltip(cid, e);
+          }
+        });
+
+        container.addEventListener('mouseout', function(e) {
+          var target = e.target.closest('[data-category]');
+          if (target) {
+            var cid = target.getAttribute('data-category');
+            if (cid) hideTooltip(cid);
+          }
+        });
+
+        // Keyboard support
+        container.querySelectorAll('[data-category]').forEach(function(el) {
+          var cid = el.getAttribute('data-category');
+          el.addEventListener('focus', function(e) { showTooltip(cid, e); });
+          el.addEventListener('blur', function() { hideTooltip(cid); });
+        });
+      }
+
+      /* ============================
+         HELPER: category label lookup
+         ============================ */
+      function catLabel(id) {
+        const c = AUDIT_CONFIG.categories.find(cat => cat.id === id);
+        return c ? c.label : id;
+      }
+
+      /* ============================
+         APP CONTROLLER
+         ============================ */
+      window.auditApp = {
+        escapeHtml: function (str) {
+          if (!str) return '';
+          return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        },
+
+        start: function () {
+          resetState();
+          initQuestionOrder();
+          state.startedAt = Date.now();
+          state.step = 'questions';
+          saveState();
+          trackEvent(AUDIT_CONFIG.analyticsEvents.started);
+          // Create server-side session
+          fetch('/api/audit/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          }).then(function (r) { return r.json(); }).then(function (data) {
+            if (data.sessionId) {
+              state.sessionId = data.sessionId;
+              saveState();
+            }
+          }).catch(function () {});
+          renderQuestion();
+          scrollToTop();
+        },
+
+        rate: function (value, event) {
+          if (auditApp._processing) return;
+          if (event && event.target && !event.target.isConnected) return;
+          var q = getCurrentQuestion();
+          if (!q) return;
+          auditApp._processing = true;
+          state.answers[q.id] = value;
+          saveState();
+          if (state.lastQuestionIndex < AUDIT_CONFIG.questions.length - 1) {
+            state.lastQuestionIndex++;
+            saveState();
+            auditApp.saveProgress();
+            renderQuestion();
+          } else {
+            state.lastQuestionIndex = AUDIT_CONFIG.questions.length;
+            saveState();
+            auditApp.saveProgress();
+            renderPersonalisation();
+          }
+          auditApp._processing = false;
+          scrollToTop();
+        },
+
+        next: function () {
+          const q = getCurrentQuestion();
+          if (!q) return;
+          if (state.answers[q.id] === undefined) return;
+
+          if (state.lastQuestionIndex < AUDIT_CONFIG.questions.length - 1) {
+            state.lastQuestionIndex++;
+            saveState();
+            renderQuestion();
+          } else {
+            renderPersonalisation();
+          }
+          scrollToTop();
+        },
+
+        prev: function () {
+          if (state.lastQuestionIndex > 0) {
+            state.lastQuestionIndex--;
+            saveState();
+            renderQuestion();
+            scrollToTop();
+          }
+        },
+
+        togglePriority: function (area) {
+          const idx = state.priorityAreas.indexOf(area);
+          if (idx > -1) {
+            state.priorityAreas.splice(idx, 1);
+          } else if (state.priorityAreas.length < 2) {
+            state.priorityAreas.push(area);
+          }
+          saveState();
+          renderPersonalisationQuestion(0);
+        },
+
+        selectWhatBroughtYou: function (value) {
+          state.whatBroughtYou = value;
+          if (value !== 'other') state.whatBroughtYouOther = '';
+          saveState();
+          renderPersonalisationQuestion(1);
+        },
+
+        setWhatBroughtYouOther: function (value) {
+          state.whatBroughtYouOther = value;
+          saveState();
+        },
+
+        nextPersonalisation: function () {
+          const currentIdx = $('audit-pq-1')?.style?.display !== 'none' ? 1 : 0;
+          if (currentIdx === 0) {
+            if (state.priorityAreas.length !== 2) return;
+            $('audit-pq-0').style.display = 'none';
+            renderPersonalisationQuestion(1);
+          } else {
+            if (!state.whatBroughtYou) return;
+            renderEmailCapture();
+          }
+          scrollToTop();
+        },
+
+        goBackFromPersonalisation: function (fromIdx) {
+          if (fromIdx === 1) {
+            $('audit-pq-1').style.display = 'none';
+            renderPersonalisationQuestion(0);
+          } else {
+            state.lastQuestionIndex = AUDIT_CONFIG.questions.length - 1;
+            saveState();
+            renderQuestion();
+          }
+          scrollToTop();
+        },
+
+        goBackToPersonalisation: function () {
+          renderPersonalisation();
+          scrollToTop();
+        },
+
+        setEmail: function (value) {
+          state.email = value;
+          saveState();
+        },
+
+        complete: function () {
+          state.completedAt = Date.now();
+          state.results = calculateResults();
+          state.scored = true;
+          state.step = 'results';
+          saveState();
+
+          if (state.email) trackEvent(AUDIT_CONFIG.analyticsEvents.emailSubmitted);
+          trackEvent(AUDIT_CONFIG.analyticsEvents.completed);
+
+          renderResults();
+          scrollToTop();
+
+          // Submit results to server (fire-and-forget)
+          var r = state.results;
+          if (r) {
+            var payload = {
+              email: state.email || null,
+              scores: r.categoryScores,
+              chapter: r.chapter,
+              pattern: r.pattern,
+              priorityAreas: state.priorityAreas || [],
+              whatBroughtYou: state.whatBroughtYou || null,
+              sessionId: state.sessionId || null,
+            };
+            fetch('/submit-audit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            }).catch(function() {});
+          }
+        },
+
+        saveProgress: function () {
+          if (!state.sessionId) return;
+          var idx = state.lastQuestionIndex;
+          var body = JSON.stringify({ sessionId: state.sessionId, lastQuestionIndex: idx });
+          fetch('/api/audit/progress', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: body,
+          }).catch(function () {});
+        },
+
+        trackWorkbookCta: function () {
+          trackEvent(AUDIT_CONFIG.analyticsEvents.workbookCta);
+        },
+
+        downloadShareCard: function () {
+          var r = state.results;
+          if (!r) return;
+
+          var svgEl = document.querySelector('.life-audit-svg');
+          var svgHtml = svgEl ? new XMLSerializer().serializeToString(svgEl) : '';
+
+          var catLabels = AUDIT_CONFIG.categories.map(function(c) { return c.label; });
+          var catData = AUDIT_CONFIG.categories.map(function(c) {
+            var s = r.categoryScores[c.id];
+            var isP = state.priorityAreas && state.priorityAreas.indexOf(c.label) !== -1;
+            return { label: c.label, score: s ? s.score.toFixed(1) : '0.0', isPriority: isP };
+          });
+
+          var reportHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Next Chapter Life Audit Report</title>';
+          reportHtml += '<style>';
+          reportHtml += 'body{font-family:Inter,sans-serif;color:#062B4F;background:#FAF6EF;padding:40px;max-width:800px;margin:0 auto;}';
+          reportHtml += 'h1{font-family:"Playfair Display",Georgia,serif;font-size:28px;color:#062B4F;text-align:center;margin-bottom:4px;}';
+          reportHtml += '.subtitle{text-align:center;color:#5F6470;font-size:14px;margin-bottom:32px;}';
+          reportHtml += '.meta{text-align:center;color:#C98A4A;font-size:12px;margin-bottom:40px;}';
+          reportHtml += '.badge{display:inline-block;padding:6px 18px;border-radius:20px;background:rgba(201,138,74,0.12);color:#C98A4A;font-weight:600;font-size:14px;margin-bottom:24px;}';
+          reportHtml += '.section-title{font-family:"Playfair Display",Georgia,serif;font-size:20px;color:#062B4F;border-bottom:1px solid rgba(6,43,79,0.1);padding-bottom:8px;margin:28px 0 16px;}';
+          reportHtml += '.score-table{width:100%;border-collapse:collapse;}';
+          reportHtml += '.score-table td{padding:10px 12px;border-bottom:1px solid rgba(6,43,79,0.06);font-size:14px;}';
+          reportHtml += '.score-table td:last-child{text-align:right;font-weight:600;}';
+          reportHtml += '.priority-tag{color:#E95F45;font-size:11px;font-weight:600;margin-left:8px;}';
+          reportHtml += '.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;}';
+          reportHtml += '.detail-card{background:#FFF8F0;border-radius:12px;padding:20px;box-shadow:0 4px 16px rgba(6,43,79,0.06);}';
+          reportHtml += '.detail-card h4{font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#C98A4A;margin:0 0 4px;}';
+          reportHtml += '.detail-card .value{font-family:"Playfair Display",Georgia,serif;font-size:18px;font-weight:700;color:#062B4F;}';
+          reportHtml += '.interp{font-size:14px;color:#5F6470;line-height:1.6;margin:16px 0;}';
+          reportHtml += '.wheel-wrap{text-align:center;margin:24px 0;}';
+          reportHtml += '.wheel-wrap svg{max-width:500px;height:auto;}';
+          reportHtml += '.footer{text-align:center;color:#5F6470;font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid rgba(6,43,79,0.08);}';
+          reportHtml += '@media print{body{padding:20px;background:white;}}';
+          reportHtml += '</style></head><body>';
+
+          reportHtml += '<h1>Your Next Chapter Life Audit</h1>';
+          reportHtml += '<p class="subtitle">This is where you are right now, not who you are.</p>';
+          reportHtml += '<div style="text-align:center;"><span class="badge">' + r.chapter.label + '</span></div>';
+
+          if (svgHtml) {
+            reportHtml += '<div class="wheel-wrap">' + svgHtml + '</div>';
+          }
+
+          reportHtml += '<h2 class="section-title">Your Scores</h2>';
+          reportHtml += '<table class="score-table">';
+          catData.forEach(function(c) {
+            reportHtml += '<tr><td>' + c.label + (c.isPriority ? '<span class="priority-tag">Priority</span>' : '') + '</td><td>' + c.score + ' / 10</td></tr>';
+          });
+          reportHtml += '</table>';
+
+          reportHtml += '<h2 class="section-title">Snapshot</h2>';
+          reportHtml += '<div class="detail-grid">';
+          reportHtml += '<div class="detail-card"><h4>Strongest Area</h4><div class="value">' + catLabel(r.strongest.category) + '</div><div style="color:#5F6470;font-size:13px;margin-top:4px;">' + r.strongest.score.score.toFixed(1) + ' / 10</div></div>';
+          reportHtml += '<div class="detail-card"><h4>Area to Explore</h4><div class="value">' + catLabel(r.weakest.category) + '</div><div style="color:#5F6470;font-size:13px;margin-top:4px;">' + r.weakest.score.score.toFixed(1) + ' / 10</div></div>';
+          reportHtml += '</div>';
+
+          if (r.pattern) {
+            reportHtml += '<h2 class="section-title">Your Pattern</h2>';
+            reportHtml += '<p class="interp"><strong>' + r.pattern.label + '</strong></p>';
+            reportHtml += '<p class="interp">' + r.pattern.interpretation + '</p>';
+          }
+
+          reportHtml += '<h2 class="section-title">Your Chapter</h2>';
+          reportHtml += '<p class="interp"><strong>' + r.chapter.label + '</strong></p>';
+          reportHtml += '<p class="interp">' + r.chapter.description + '</p>';
+
+          reportHtml += '<div class="footer">next-chapter-studio.com &mdash; Design Your Next Chapter</div>';
+          reportHtml += '</body></html>';
+
+          var win = window.open('', '_blank');
+          if (!win) {
+            alert('Please allow popups to download your report.');
+            return;
+          }
+          win.document.write(reportHtml);
+          win.document.close();
+
+          setTimeout(function() {
+            win.focus();
+            win.print();
+          }, 500);
+
+          trackEvent(AUDIT_CONFIG.analyticsEvents.resultsDownloaded);
+        },
+
+        retake: function () {
+          trackEvent(AUDIT_CONFIG.analyticsEvents.retaken);
+          resetState();
+          initQuestionOrder();
+          renderLanding();
+          scrollToTop();
+        },
+      };
+
+      /* ============================
+         INIT
+         ============================ */
+      loadState();
+      initQuestionOrder();
+
+      // Save progress on page unload
+      window.addEventListener('beforeunload', function () {
+        if (state.sessionId && state.lastQuestionIndex > 0) {
+          var body = JSON.stringify({ sessionId: state.sessionId, lastQuestionIndex: state.lastQuestionIndex });
+          navigator.sendBeacon('/api/audit/progress', body);
+        }
+      });
+
+      if (state.step === 'questions' || state.step === 'results') {
+        const answers = Object.values(state.answers).filter(v => v !== undefined);
+        if (state.step === 'results' && state.results) {
+          renderResults();
+        } else if (answers.length > 0) {
+          renderQuestion();
+        } else {
+          renderLanding();
+        }
+      } else {
+        renderLanding();
+      }
+
+    })();
+  </script>
+
+</body>
+</html>
