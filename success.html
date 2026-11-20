@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thank You — Design Your Next Chapter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/png" href="/assets/compass.png">
+</head>
+<body class="simple-page">
+  <main>
+    <div class="container result-card">
+      <div class="result-icon success-icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h1>Thank You!</h1>
+      <p class="result-subtitle">Welcome to <strong>Design Your Next Chapter</strong>.</p>
+      <p>Your payment was successful. Your download will start shortly.</p>
+      <div id="download-area" class="result-download">
+        <a id="download-link" class="btn btn-primary btn-large" download>Download Your Workbook</a>
+        <div id="bonus-section" style="margin-top:24px; padding-top:20px; border-top:1px solid #ddd;">
+          <p style="font-size:0.9rem; color:#5F6470; margin-bottom:12px;">🎁 <strong>You also received the bonus 21-Day Guide</strong> — daily prompts, reflection questions, and a progress tracker to support your journey.</p>
+          <a id="bonus-link" class="btn btn-secondary btn-large" download>Download Bonus 21-Day Guide</a>
+        </div>
+      </div>
+      <p class="result-note">A confirmation email has also been sent to your inbox.</p>
+    </div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get('session_id');
+
+    async function verifyAndDownload() {
+      if (!sessionId) {
+        document.getElementById('download-area').innerHTML = '<p style="color:#E95F45;">Missing session ID. Please contact support.</p>';
+        return;
+      }
+
+      try {
+        const res = await fetch(`/verify-purchase?session_id=${sessionId}`);
+        const data = await res.json();
+
+        if (data.verified) {
+          const link = document.getElementById('download-link');
+          link.href = data.downloadUrl || '/Design-Your-Next-Chapter.pdf';
+          if (data.bonusUrl) {
+            document.getElementById('bonus-link').href = data.bonusUrl;
+          } else {
+            document.getElementById('bonus-section').style.display = 'none';
+          }
+        } else {
+          document.getElementById('download-area').innerHTML = '<p style="color:#E95F45;">Payment could not be verified. Please contact support.</p>';
+        }
+      } catch (err) {
+        document.getElementById('download-area').innerHTML = '<p style="color:#E95F45;">Verification failed. Please contact support.</p>';
+      }
+    }
+
+    verifyAndDownload();
+  </script>
+
+  <!-- LinkedIn Insight Tag -->
+  <script type="text/javascript">
+    _linkedin_partner_id = "9629572";
+    window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+    window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+  </script>
+  <script type="text/javascript">
+    (function(l) {
+      if (!l){window.lintrk = function(a,b){window.lintrk.q.push([a,b])}; window.lintrk.q=[]}
+      var s = document.getElementsByTagName("script")[0];
+      var b = document.createElement("script");
+      b.type = "text/javascript"; b.async = true;
+      b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+      s.parentNode.insertBefore(b, s);
+    })(window.lintrk);
+  </script>
+  <noscript>
+    <img height="1" width="1" style="display:none;" alt="" src="https://px.ads.linkedin.com/collect/?pid=9629572&fmt=gif" />
+  </noscript>
+
+  <script>
+    window.lintrk('track', { conversion_id: 27249588 });
+  </script>
+</body>
+</html>
